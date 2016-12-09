@@ -1,15 +1,16 @@
 package registry_test
 
 import (
+	"bytes"
 	"fmt"
+	"strings"
 
 	. "code.cloudfoundry.org/gorouter/registry"
-	"code.cloudfoundry.org/lager"
-	"code.cloudfoundry.org/lager/lagertest"
 	"code.cloudfoundry.org/routing-api/models"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gbytes"
+	"github.com/uber-go/zap"
 
 	"code.cloudfoundry.org/gorouter/config"
 	"code.cloudfoundry.org/gorouter/metrics/reporter/fakes"
@@ -19,18 +20,59 @@ import (
 	"time"
 )
 
-var _ = Describe("RouteRegistry", func() {
-	var r *RouteRegistry
-	var reporter *fakes.FakeRouteRegistryReporter
+// Taken from github.com/uber-go/zap
+type testBuffer struct {
+	bytes.Buffer
+}
 
-	var fooEndpoint, barEndpoint, bar2Endpoint *route.Endpoint
-	var configObj *config.Config
-	var logger lager.Logger
-	var modTag models.ModificationTag
+func (b *testBuffer) Sync() error {
+	return nil
+}
+
+func (b *testBuffer) Lines() []string {
+	output := strings.Split(b.String(), "\n")
+	return output[:len(output)-1]
+}
+
+func (b *testBuffer) Stripped() string {
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func numberLevelFormatter() zap.LevelFormatter {
+	return zap.LevelFormatter(func(level zap.Level) zap.Field {
+		return zap.Int("log_level", levelNumber(level))
+	})
+}
+
+// We add 1 to zap's default values to match our level definitions
+// https://github.com/uber-go/zap/blob/47f41350ff078ea1415b63c117bf1475b7bbe72c/level.go#L36
+func levelNumber(level zap.Level) int {
+	return int(level) + 1
+}
+
+var _ = Describe("RouteRegistry", func() {
+	var (
+		r        *RouteRegistry
+		reporter *fakes.FakeRouteRegistryReporter
+
+		fooEndpoint, barEndpoint, bar2Endpoint *route.Endpoint
+		configObj                              *config.Config
+		logger                                 zap.Logger
+		modTag                                 models.ModificationTag
+
+		sink    *testBuffer
+		errSink *testBuffer
+	)
 
 	BeforeEach(func() {
-
-		logger = lagertest.NewTestLogger("test")
+		sink = &testBuffer{}
+		errSink = &testBuffer{}
+		logger = zap.New(
+			zap.NewJSONEncoder(zap.NoTime(), zap.MessageKey("message"), numberLevelFormatter()),
+			zap.DebugLevel,
+			zap.Output(zap.MultiWriteSyncer(sink, zap.AddSync(GinkgoWriter))),
+			zap.ErrorOutput(zap.MultiWriteSyncer(errSink, zap.AddSync(GinkgoWriter))),
+		)
 		configObj = config.DefaultConfig()
 		configObj.PruneStaleDropletsInterval = 50 * time.Millisecond
 		configObj.DropletStaleThreshold = 24 * time.Millisecond
@@ -156,7 +198,9 @@ var _ = Describe("RouteRegistry", func() {
 			})
 
 			It("logs at debug level", func() {
-				Expect(logger).To(gbytes.Say(`uri-added.*"log_level":0.*a\.route`))
+				Eventually(func() *gbytes.Buffer {
+					return gbytes.BufferWithBytes(sink.Bytes())
+				}).Should(gbytes.Say(`"log_level":0.*uri-added.*a\.route`))
 			})
 
 			It("logs register message only for new routes", func() {
